@@ -31,6 +31,7 @@ const Command = @import("Command.zig");
 const terminal = @import("terminal/main.zig");
 const configpkg = @import("config.zig");
 const Duration = configpkg.Config.Duration;
+const url = @import("config/url.zig");
 const input = @import("input.zig");
 const App = @import("App.zig");
 const internal_os = @import("os/main.zig");
@@ -4141,9 +4142,11 @@ pub fn mouseButtonCallback(
                 }
             },
 
-            // Double click, select the word under our mouse
+            // Double click, select the word under our mouse.
+            // First try to detect if we're clicking on a URL to select the entire URL.
             2 => {
-                const sel_ = self.io.terminal.screens.active.selectWord(pin.*);
+                const sel_ = self.urlAtPin(pin.*) orelse
+                    self.io.terminal.screens.active.selectWord(pin.*);
                 if (sel_) |sel| {
                     try self.io.terminal.screens.active.select(sel);
                     try self.queueRender();
@@ -4397,6 +4400,53 @@ fn linkAtPos(
             const sel = match.selection();
             if (!sel.contains(screen, mouse_pin)) continue;
             return .{ link.action, sel };
+        }
+    }
+
+    return null;
+}
+
+/// Attempt to detect a URL at the given pin position for double-click selection.
+/// This uses the default URL regex pattern to find URLs without requiring
+/// modifier keys (unlike linkAtPos which requires ctrl/cmd for URL detection).
+///
+/// Requires the renderer state mutex is held.
+fn urlAtPin(self: *Surface, mouse_pin: terminal.Pin) ?terminal.Selection {
+    const screen: *terminal.Screen = self.renderer_state.terminal.screens.active;
+
+    // Get the line we're on
+    const line = screen.selectLine(.{
+        .pin = mouse_pin,
+        .whitespace = null,
+        .semantic_prompt_boundary = false,
+    }) orelse return null;
+
+    var strmap: terminal.StringMap = undefined;
+    self.alloc.free(screen.selectionString(self.alloc, .{
+        .sel = line,
+        .trim = false,
+        .map = &strmap,
+    }) catch return null);
+    defer strmap.deinit(self.alloc);
+
+    // Use the default URL regex pattern
+    var re = oni.Regex.init(
+        url.regex,
+        .{},
+        oni.Encoding.utf8,
+        oni.Syntax.default,
+        null,
+    ) catch return null;
+    defer re.deinit();
+
+    // Search for URL matches in the line
+    var it = strmap.searchIterator(re);
+    while (true) {
+        var match = (it.next() catch return null) orelse break;
+        defer match.deinit();
+        const sel = match.selection();
+        if (sel.contains(screen, mouse_pin)) {
+            return sel;
         }
     }
 
